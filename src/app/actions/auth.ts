@@ -38,11 +38,15 @@ export async function login(provider: 'github' | 'google' | 'email', email?: str
 export async function signUp(email: string, password: string) {
   const supabase = await createClient()
 
-  const { error } = await supabase.auth.signUp({
+  const { data, error } = await supabase.auth.signUp({
     email,
     password,
     options: {
       emailRedirectTo: `${process.env.NEXT_PUBLIC_SITE_URL}/auth/callback`,
+      // Add data to help with debugging
+      data: {
+        email_confirmed: false
+      }
     },
   })
 
@@ -50,7 +54,17 @@ export async function signUp(email: string, password: string) {
     return { error: error.message }
   }
 
-  return { success: true, message: 'Check your email to confirm your account' }
+  // Check if email confirmation is disabled in Supabase settings
+  if (data.user && data.user.identities && data.user.identities.length === 0) {
+    return { 
+      error: 'An account with this email already exists. Please sign in instead.' 
+    }
+  }
+
+  return { 
+    success: true, 
+    message: 'Check your email to confirm your account. If you don\'t see it, check your spam folder.' 
+  }
 }
 
 export async function signOut() {
