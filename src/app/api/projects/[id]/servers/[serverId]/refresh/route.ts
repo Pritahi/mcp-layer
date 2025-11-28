@@ -87,8 +87,10 @@ export async function POST(
           'Authorization': `Bearer ${server.authToken}`,
         },
         body: JSON.stringify({
-          method: 'list_tools',
-          params: {}
+          jsonrpc: '2.0',
+          method: 'tools/list',
+          params: {},
+          id: `refresh-${Date.now()}`,
         }),
         signal: AbortSignal.timeout(10000), // 10 second timeout
       });
@@ -114,10 +116,13 @@ export async function POST(
       }
 
       if (!handshakeResponse.ok) {
+        const errorText = await handshakeResponse.text().catch(() => 'Unknown error');
         return NextResponse.json(
           { 
             error: `MCP handshake failed: Server returned status ${handshakeResponse.status}`,
-            code: 'HANDSHAKE_ERROR'
+            code: 'HANDSHAKE_ERROR',
+            details: errorText,
+            hint: 'Check if the Base URL and Auth Token are correct'
           },
           { status: 400 }
         );
@@ -125,7 +130,7 @@ export async function POST(
 
       const handshakeData = await handshakeResponse.json();
       
-      // Extract tools from various possible response structures
+      // Extract tools from JSON-RPC response
       if (handshakeData.result?.tools) {
         cachedTools = handshakeData.result.tools;
       } else if (handshakeData.tools) {

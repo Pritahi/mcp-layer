@@ -5,10 +5,10 @@ import { eq } from 'drizzle-orm';
 
 export async function POST(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const projectId = params.id;
+    const { id: projectId } = await params;
     
     // Validate project ID
     if (!projectId) {
@@ -82,8 +82,10 @@ export async function POST(
           'Authorization': `Bearer ${sanitizedAuthToken}`,
         },
         body: JSON.stringify({
-          method: 'list_tools',
+          jsonrpc: '2.0',
+          method: 'tools/list',
           params: {},
+          id: `handshake-${Date.now()}`,
         }),
       });
 
@@ -116,7 +118,8 @@ export async function POST(
           { 
             error: `MCP handshake failed: Server returned status ${handshakeResponse.status}`, 
             code: 'HANDSHAKE_FAILED',
-            details: errorText
+            details: errorText,
+            hint: 'Check if the Base URL and Auth Token are correct'
           },
           { status: 400 }
         );
@@ -124,7 +127,7 @@ export async function POST(
 
       const handshakeData = await handshakeResponse.json();
       
-      // Extract tools array from response
+      // Extract tools array from JSON-RPC response
       if (handshakeData && handshakeData.result && Array.isArray(handshakeData.result.tools)) {
         cachedTools = handshakeData.result.tools;
       } else if (handshakeData && Array.isArray(handshakeData.tools)) {
@@ -210,10 +213,10 @@ export async function POST(
 
 export async function GET(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const projectId = params.id;
+    const { id: projectId } = await params;
     
     // Validate project ID
     if (!projectId) {
