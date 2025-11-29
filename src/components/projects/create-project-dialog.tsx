@@ -16,6 +16,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { toast } from 'sonner'
+import { createProject } from '@/app/actions/projects'
 
 interface CreateProjectDialogProps {
   userId: string
@@ -38,16 +39,10 @@ export function CreateProjectDialog({ userId }: CreateProjectDialogProps) {
     setLoading(true)
 
     try {
-      const response = await fetch('/api/projects', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: name.trim(), userId }),
-      })
+      const result = await createProject(name.trim())
 
-      const data = await response.json()
-
-      if (!response.ok) {
-        throw new Error(data.error || 'Failed to create project')
+      if (result.error) {
+        throw new Error(result.error)
       }
 
       toast.success('Project created successfully')

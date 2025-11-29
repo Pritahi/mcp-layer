@@ -16,6 +16,7 @@ import { Label } from '@/components/ui/label'
 import { Plus, Loader2 } from 'lucide-react'
 import { toast } from 'sonner'
 import { useRouter } from 'next/navigation'
+import { createProject } from '@/app/actions/projects'
 
 interface NewProjectDialogProps {
   userId: string
@@ -38,21 +39,10 @@ export function NewProjectDialog({ userId }: NewProjectDialogProps) {
     setLoading(true)
 
     try {
-      const response = await fetch('/api/projects', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          name: name.trim(),
-          userId,
-        }),
-      })
+      const result = await createProject(name.trim())
 
-      const data = await response.json()
-
-      if (!response.ok) {
-        throw new Error(data.error || 'Failed to create project')
+      if (result.error) {
+        throw new Error(result.error)
       }
 
       toast.success('Project created successfully')

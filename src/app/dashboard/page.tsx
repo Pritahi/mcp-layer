@@ -9,7 +9,8 @@ import { LogOut, FolderPlus } from 'lucide-react'
 interface Project {
   id: string
   name: string
-  createdAt: string
+  created_at: string
+  user_id: string
 }
 
 export default async function DashboardPage() {
@@ -25,37 +26,39 @@ export default async function DashboardPage() {
     redirect('/login')
   }
 
-  // Fetch projects
-  const response = await fetch(`${process.env.NEXT_PUBLIC_SITE_URL}/api/projects?userId=${user.id}`, {
-    cache: 'no-store'
-  })
-  
-  let projects: Project[] = []
-  let serverCounts: Record<string, number> = {}
-  let keyCounts: Record<string, number> = {}
+  // Fetch projects directly from Supabase
+  const { data: projects, error: projectsError } = await supabase
+    .from('projects')
+    .select('*')
+    .eq('user_id', user.id)
+    .order('created_at', { ascending: false })
 
-  if (response.ok) {
-    projects = await response.json()
-    
-    // Fetch counts for each project
-    await Promise.all(projects.map(async (project) => {
-      const detailsResponse = await fetch(
-        `${process.env.NEXT_PUBLIC_SITE_URL}/api/projects/${project.id}?userId=${user.id}`,
-        { cache: 'no-store' }
-      )
-      if (detailsResponse.ok) {
-        const data = await detailsResponse.json()
-        serverCounts[project.id] = data.servers?.length || 0
-      }
+  if (projectsError) {
+    console.error('Error fetching projects:', projectsError)
+  }
 
-      const keysResponse = await fetch(
-        `${process.env.NEXT_PUBLIC_SITE_URL}/api/projects/${project.id}/keys?userId=${user.id}`,
-        { cache: 'no-store' }
-      )
-      if (keysResponse.ok) {
-        const keys = await keysResponse.json()
-        keyCounts[project.id] = keys.length || 0
-      }
+  const projectsList: Project[] = projects || []
+  const serverCounts: Record<string, number> = {}
+  const keyCounts: Record<string, number> = {}
+
+  // Fetch counts for each project
+  if (projectsList.length > 0) {
+    await Promise.all(projectsList.map(async (project) => {
+      // Fetch server count
+      const { data: servers } = await supabase
+        .from('mcp_servers')
+        .select('id')
+        .eq('project_id', project.id)
+      
+      serverCounts[project.id] = servers?.length || 0
+
+      // Fetch keys count
+      const { data: keys } = await supabase
+        .from('api_keys')
+        .select('id')
+        .eq('project_id', project.id)
+      
+      keyCounts[project.id] = keys?.length || 0
     }))
   }
 
@@ -86,7 +89,7 @@ export default async function DashboardPage() {
         </div>
 
         {/* Projects Grid */}
-        {projects.length === 0 ? (
+        {projectsList.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-24 text-center">
             <div className="flex h-20 w-20 items-center justify-center rounded-full bg-zinc-900 mb-6">
               <FolderPlus className="h-10 w-10 text-zinc-700" />
@@ -101,12 +104,12 @@ export default async function DashboardPage() {
           </div>
         ) : (
           <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
-            {projects.map((project) => (
+            {projectsList.map((project) => (
               <ProjectCard
                 key={project.id}
                 id={project.id}
                 name={project.name}
-                createdAt={project.createdAt}
+                createdAt={project.created_at}
                 serverCount={serverCounts[project.id]}
                 keyCount={keyCounts[project.id]}
               />
