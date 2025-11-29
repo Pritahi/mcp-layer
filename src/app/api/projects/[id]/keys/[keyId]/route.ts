@@ -1,7 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/db';
-import { apiKeys, projects } from '@/db/schema';
-import { eq, and } from 'drizzle-orm';
+import { createClient } from '@/lib/supabase/server';
 
 interface RouteContext {
   params: Promise<{ id: string; keyId: string; }>;
@@ -83,14 +81,17 @@ export async function PATCH(
       }
     }
 
-    // Fetch the API key
-    const existingKey = await db
-      .select()
-      .from(apiKeys)
-      .where(and(eq(apiKeys.id, keyId), eq(apiKeys.projectId, id)))
-      .limit(1);
+    const supabase = await createClient();
 
-    if (existingKey.length === 0) {
+    // Fetch the API key
+    const { data: existingKey, error: keyError } = await supabase
+      .from('api_keys')
+      .select('*')
+      .eq('id', keyId)
+      .eq('project_id', id)
+      .single();
+
+    if (keyError || !existingKey) {
       return NextResponse.json(
         { error: 'API key not found', code: 'KEY_NOT_FOUND' },
         { status: 404 }
@@ -98,13 +99,13 @@ export async function PATCH(
     }
 
     // Fetch the project to verify userId
-    const project = await db
-      .select()
-      .from(projects)
-      .where(eq(projects.id, id))
-      .limit(1);
+    const { data: project, error: projectError } = await supabase
+      .from('projects')
+      .select('user_id')
+      .eq('id', id)
+      .single();
 
-    if (project.length === 0 || project[0].userId !== userId) {
+    if (projectError || !project || project.user_id !== userId) {
       return NextResponse.json(
         { error: 'API key not found', code: 'KEY_NOT_FOUND' },
         { status: 404 }
@@ -114,9 +115,9 @@ export async function PATCH(
     // Build updates object with only provided fields
     const updates: {
       label?: string;
-      allowedTools?: string[];
-      blacklistWords?: string[];
-      isActive?: boolean;
+      allowed_tools?: string[];
+      blacklist_words?: string[];
+      is_active?: boolean;
     } = {};
 
     if (label !== undefined) {
@@ -124,25 +125,35 @@ export async function PATCH(
     }
 
     if (allowedTools !== undefined) {
-      updates.allowedTools = allowedTools;
+      updates.allowed_tools = allowedTools;
     }
 
     if (blacklistWords !== undefined) {
-      updates.blacklistWords = blacklistWords;
+      updates.blacklist_words = blacklistWords;
     }
 
     if (isActive !== undefined) {
-      updates.isActive = isActive;
+      updates.is_active = isActive;
     }
 
     // Update the API key
-    const updatedKey = await db
-      .update(apiKeys)
-      .set(updates)
-      .where(and(eq(apiKeys.id, keyId), eq(apiKeys.projectId, id)))
-      .returning();
+    const { data: updatedKey, error: updateError } = await supabase
+      .from('api_keys')
+      .update(updates)
+      .eq('id', keyId)
+      .eq('project_id', id)
+      .select()
+      .single();
 
-    return NextResponse.json(updatedKey[0], { status: 200 });
+    if (updateError) {
+      console.error('Update error:', updateError);
+      return NextResponse.json(
+        { error: 'Failed to update API key' },
+        { status: 500 }
+      );
+    }
+
+    return NextResponse.json(updatedKey, { status: 200 });
   } catch (error) {
     console.error('PATCH error:', error);
     return NextResponse.json(

@@ -1,7 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/db';
-import { apiKeys, projects } from '@/db/schema';
-import { eq } from 'drizzle-orm';
+import { createClient } from '@/lib/supabase/server';
 
 export async function DELETE(
   request: NextRequest,
@@ -35,14 +33,17 @@ export async function DELETE(
       );
     }
 
+    const supabase = await createClient();
+
     // Step 1: Fetch API key by id
-    const apiKey = await db.select()
-      .from(apiKeys)
-      .where(eq(apiKeys.id, id))
-      .limit(1);
+    const { data: apiKey, error: keyError } = await supabase
+      .from('api_keys')
+      .select('id, project_id')
+      .eq('id', id)
+      .single();
 
     // Step 2: If not found, return 404
-    if (apiKey.length === 0) {
+    if (keyError || !apiKey) {
       return NextResponse.json(
         { 
           error: 'API key not found',
@@ -53,13 +54,14 @@ export async function DELETE(
     }
 
     // Step 3: Fetch project using key's projectId
-    const project = await db.select()
-      .from(projects)
-      .where(eq(projects.id, apiKey[0].projectId))
-      .limit(1);
+    const { data: project, error: projectError } = await supabase
+      .from('projects')
+      .select('user_id')
+      .eq('id', apiKey.project_id)
+      .single();
 
     // Step 4 & 5: Verify project.userId matches provided userId
-    if (project.length === 0 || project[0].userId !== userId) {
+    if (projectError || !project || project.user_id !== userId) {
       return NextResponse.json(
         { 
           error: 'API key not found',
@@ -70,11 +72,12 @@ export async function DELETE(
     }
 
     // Step 6: Proceed with deletion
-    const deleted = await db.delete(apiKeys)
-      .where(eq(apiKeys.id, id))
-      .returning();
+    const { error: deleteError } = await supabase
+      .from('api_keys')
+      .delete()
+      .eq('id', id);
 
-    if (deleted.length === 0) {
+    if (deleteError) {
       return NextResponse.json(
         { 
           error: 'Failed to delete API key',
@@ -87,7 +90,7 @@ export async function DELETE(
     return NextResponse.json(
       { 
         message: 'API key deleted successfully',
-        id: deleted[0].id
+        id
       },
       { status: 200 }
     );

@@ -1,14 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/db';
-import { auditLogs, projects } from '@/db/schema';
-import { eq, and, desc } from 'drizzle-orm';
+import { createClient } from '@/lib/supabase/server';
 
 export async function GET(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const { id } = params;
+    const { id } = await params;
     const { searchParams } = new URL(request.url);
     
     // Required userId for authorization
@@ -35,14 +33,16 @@ export async function GET(
     const serverName = searchParams.get('serverName');
     const toolName = searchParams.get('toolName');
 
-    // Verify project exists and belongs to userId
-    const project = await db
-      .select()
-      .from(projects)
-      .where(eq(projects.id, id))
-      .limit(1);
+    const supabase = await createClient();
 
-    if (project.length === 0) {
+    // Verify project exists and belongs to userId
+    const { data: project, error: projectError } = await supabase
+      .from('projects')
+      .select('user_id')
+      .eq('id', id)
+      .single();
+
+    if (projectError || !project) {
       return NextResponse.json(
         { 
           error: 'Project not found',
@@ -52,7 +52,7 @@ export async function GET(
       );
     }
 
-    if (project[0].userId !== userId) {
+    if (project.user_id !== userId) {
       return NextResponse.json(
         { 
           error: 'Unauthorized access to project',
@@ -62,31 +62,37 @@ export async function GET(
       );
     }
 
-    // Build dynamic query with filters
-    const conditions = [eq(auditLogs.projectId, id)];
+    // Build query with filters
+    let query = supabase
+      .from('audit_logs')
+      .select('*')
+      .eq('project_id', id)
+      .order('created_at', { ascending: false })
+      .range(offset, offset + limit - 1);
 
     if (status) {
-      conditions.push(eq(auditLogs.status, status));
+      query = query.eq('status', status);
     }
 
     if (serverName) {
-      conditions.push(eq(auditLogs.serverName, serverName));
+      query = query.eq('server_name', serverName);
     }
 
     if (toolName) {
-      conditions.push(eq(auditLogs.toolName, toolName));
+      query = query.eq('tool_name', toolName);
     }
 
-    // Execute query with all filters
-    const logs = await db
-      .select()
-      .from(auditLogs)
-      .where(and(...conditions))
-      .orderBy(desc(auditLogs.createdAt))
-      .limit(limit)
-      .offset(offset);
+    const { data: logs, error: logsError } = await query;
 
-    return NextResponse.json(logs, { status: 200 });
+    if (logsError) {
+      console.error('Fetch audit logs error:', logsError);
+      return NextResponse.json(
+        { error: 'Failed to fetch audit logs' },
+        { status: 500 }
+      );
+    }
+
+    return NextResponse.json(logs || [], { status: 200 });
 
   } catch (error) {
     console.error('GET audit logs error:', error);

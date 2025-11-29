@@ -1,7 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/db';
-import { mcpServers, projects } from '@/db/schema';
-import { eq, and } from 'drizzle-orm';
+import { createClient } from '@/lib/supabase/server';
 
 interface RouteContext {
   params: Promise<{ id: string; serverId: string; }>;
@@ -41,35 +39,31 @@ export async function POST(
       );
     }
 
-    // Fetch the server
-    const serverResult = await db
-      .select()
-      .from(mcpServers)
-      .where(
-        and(
-          eq(mcpServers.id, serverId),
-          eq(mcpServers.projectId, id)
-        )
-      )
-      .limit(1);
+    const supabase = await createClient();
 
-    if (serverResult.length === 0) {
+    // Fetch the server
+    const { data: server, error: serverError } = await supabase
+      .from('mcp_servers')
+      .select('*')
+      .eq('id', serverId)
+      .eq('project_id', id)
+      .single();
+
+    if (serverError || !server) {
       return NextResponse.json(
         { error: 'Server not found', code: 'SERVER_NOT_FOUND' },
         { status: 404 }
       );
     }
 
-    const server = serverResult[0];
-
     // Verify project ownership
-    const projectResult = await db
-      .select()
-      .from(projects)
-      .where(eq(projects.id, id))
-      .limit(1);
+    const { data: project, error: projectError } = await supabase
+      .from('projects')
+      .select('user_id')
+      .eq('id', id)
+      .single();
 
-    if (projectResult.length === 0 || projectResult[0].userId !== userId) {
+    if (projectError || !project || project.user_id !== userId) {
       return NextResponse.json(
         { error: 'Server not found', code: 'SERVER_NOT_FOUND' },
         { status: 404 }
@@ -80,12 +74,18 @@ export async function POST(
     let cachedTools: any[] = [];
     
     try {
-      const handshakeResponse = await fetch(server.baseUrl, {
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+
+      // Only add Authorization header if token is provided
+      if (server.auth_token) {
+        headers['Authorization'] = `Bearer ${server.auth_token}`;
+      }
+
+      const handshakeResponse = await fetch(server.base_url, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${server.authToken}`,
-        },
+        headers,
         body: JSON.stringify({
           jsonrpc: '2.0',
           method: 'tools/list',
@@ -98,7 +98,7 @@ export async function POST(
       if (handshakeResponse.status === 401) {
         return NextResponse.json(
           { 
-            error: 'MCP handshake failed: Invalid authentication token',
+            error: 'MCP handshake failed: Authentication required or invalid token',
             code: 'HANDSHAKE_AUTH_FAILED'
           },
           { status: 400 }
@@ -122,7 +122,7 @@ export async function POST(
             error: `MCP handshake failed: Server returned status ${handshakeResponse.status}`,
             code: 'HANDSHAKE_ERROR',
             details: errorText,
-            hint: 'Check if the Base URL and Auth Token are correct'
+            hint: 'Check if the Base URL is correct and if authentication is required'
           },
           { status: 400 }
         );
@@ -174,23 +174,25 @@ export async function POST(
     }
 
     // Update server with cached tools
-    const updatedServer = await db
-      .update(mcpServers)
-      .set({
-        cachedTools: cachedTools,
-        updatedAt: new Date().toISOString(),
+    const { data: updatedServer, error: updateError } = await supabase
+      .from('mcp_servers')
+      .update({
+        cached_tools: cachedTools,
+        updated_at: new Date().toISOString(),
       })
-      .where(eq(mcpServers.id, serverId))
-      .returning();
+      .eq('id', serverId)
+      .select()
+      .single();
 
-    if (updatedServer.length === 0) {
+    if (updateError) {
+      console.error('Update error:', updateError);
       return NextResponse.json(
         { error: 'Failed to update server', code: 'UPDATE_FAILED' },
         { status: 500 }
       );
     }
 
-    return NextResponse.json(updatedServer[0], { status: 200 });
+    return NextResponse.json(updatedServer, { status: 200 });
 
   } catch (error: any) {
     console.error('POST /api/projects/[id]/servers/[serverId]/refresh error:', error);

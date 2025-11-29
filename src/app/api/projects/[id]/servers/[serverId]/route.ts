@@ -1,7 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/db';
-import { mcpServers, projects } from '@/db/schema';
-import { eq, and } from 'drizzle-orm';
+import { createClient } from '@/lib/supabase/server';
 
 interface RouteContext {
   params: Promise<{
@@ -17,14 +15,20 @@ function isValidUUID(uuid: string): boolean {
 }
 
 // Helper function to perform MCP handshake
-async function performMCPHandshake(baseUrl: string, authToken: string): Promise<any> {
+async function performMCPHandshake(baseUrl: string, authToken: string | null): Promise<any> {
   try {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+
+    // Only add Authorization header if token is provided
+    if (authToken) {
+      headers['Authorization'] = `Bearer ${authToken}`;
+    }
+
     const response = await fetch(`${baseUrl}/list_tools`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${authToken}`
-      }
+      headers
     });
 
     if (!response.ok) {
@@ -69,14 +73,17 @@ export async function GET(request: NextRequest, context: RouteContext) {
       );
     }
 
-    // Fetch the server
-    const serverResult = await db
-      .select()
-      .from(mcpServers)
-      .where(and(eq(mcpServers.id, serverId), eq(mcpServers.projectId, id)))
-      .limit(1);
+    const supabase = await createClient();
 
-    if (serverResult.length === 0) {
+    // Fetch the server
+    const { data: server, error: serverError } = await supabase
+      .from('mcp_servers')
+      .select('*')
+      .eq('id', serverId)
+      .eq('project_id', id)
+      .single();
+
+    if (serverError || !server) {
       return NextResponse.json(
         { error: 'Server not found', code: 'SERVER_NOT_FOUND' },
         { status: 404 }
@@ -84,20 +91,20 @@ export async function GET(request: NextRequest, context: RouteContext) {
     }
 
     // Verify project ownership
-    const projectResult = await db
-      .select()
-      .from(projects)
-      .where(eq(projects.id, id))
-      .limit(1);
+    const { data: project, error: projectError } = await supabase
+      .from('projects')
+      .select('user_id')
+      .eq('id', id)
+      .single();
 
-    if (projectResult.length === 0 || projectResult[0].userId !== userId) {
+    if (projectError || !project || project.user_id !== userId) {
       return NextResponse.json(
         { error: 'Server not found', code: 'SERVER_NOT_FOUND' },
         { status: 404 }
       );
     }
 
-    return NextResponse.json(serverResult[0], { status: 200 });
+    return NextResponse.json(server, { status: 200 });
 
   } catch (error) {
     console.error('GET error:', error);
@@ -128,27 +135,29 @@ export async function PUT(request: NextRequest, context: RouteContext) {
       }, { status: 400 });
     }
 
+    const supabase = await createClient();
+
     // Parse request body
     const body = await request.json();
     const { name, baseUrl, authToken, isActive } = body;
 
     // Check if server exists and belongs to project
-    const existingServer = await db.select()
-      .from(mcpServers)
-      .where(and(eq(mcpServers.id, serverId), eq(mcpServers.projectId, id)))
-      .limit(1);
+    const { data: currentServer, error: fetchError } = await supabase
+      .from('mcp_servers')
+      .select('*')
+      .eq('id', serverId)
+      .eq('project_id', id)
+      .single();
 
-    if (existingServer.length === 0) {
+    if (fetchError || !currentServer) {
       return NextResponse.json({ 
         error: 'Server not found' 
       }, { status: 404 });
     }
 
-    const currentServer = existingServer[0];
-
     // Prepare update object
     const updates: any = {
-      updatedAt: new Date().toISOString()
+      updated_at: new Date().toISOString()
     };
 
     // Add fields if provided
@@ -169,13 +178,13 @@ export async function PUT(request: NextRequest, context: RouteContext) {
           code: "INVALID_IS_ACTIVE" 
         }, { status: 400 });
       }
-      updates.isActive = isActive;
+      updates.is_active = isActive;
     }
 
     // Check if baseUrl or authToken is being updated
     const needsHandshake = baseUrl !== undefined || authToken !== undefined;
-    const finalBaseUrl = baseUrl !== undefined ? baseUrl : currentServer.baseUrl;
-    const finalAuthToken = authToken !== undefined ? authToken : currentServer.authToken;
+    const finalBaseUrl = baseUrl !== undefined ? baseUrl : currentServer.base_url;
+    const finalAuthToken = authToken !== undefined ? authToken : currentServer.auth_token;
 
     if (baseUrl !== undefined) {
       if (typeof baseUrl !== 'string' || baseUrl.trim() === '') {
@@ -184,24 +193,28 @@ export async function PUT(request: NextRequest, context: RouteContext) {
           code: "INVALID_BASE_URL" 
         }, { status: 400 });
       }
-      updates.baseUrl = baseUrl.trim();
+      updates.base_url = baseUrl.trim();
     }
 
     if (authToken !== undefined) {
-      if (typeof authToken !== 'string' || authToken.trim() === '') {
+      // Allow null or empty string for optional authentication
+      if (authToken !== null && typeof authToken === 'string') {
+        updates.auth_token = authToken.trim() || null;
+      } else if (authToken === null || authToken === '') {
+        updates.auth_token = null;
+      } else {
         return NextResponse.json({ 
-          error: "Auth token must be a non-empty string",
+          error: "Auth token must be a string or null",
           code: "INVALID_AUTH_TOKEN" 
         }, { status: 400 });
       }
-      updates.authToken = authToken.trim();
     }
 
     // Perform MCP handshake if baseUrl or authToken changed
     if (needsHandshake) {
       try {
         const toolsResponse = await performMCPHandshake(finalBaseUrl, finalAuthToken);
-        updates.cachedTools = toolsResponse;
+        updates.cached_tools = toolsResponse;
       } catch (error) {
         console.error('MCP handshake failed:', error);
         return NextResponse.json({ 
@@ -213,18 +226,22 @@ export async function PUT(request: NextRequest, context: RouteContext) {
     }
 
     // Update server
-    const updatedServer = await db.update(mcpServers)
-      .set(updates)
-      .where(and(eq(mcpServers.id, serverId), eq(mcpServers.projectId, id)))
-      .returning();
+    const { data: updatedServer, error: updateError } = await supabase
+      .from('mcp_servers')
+      .update(updates)
+      .eq('id', serverId)
+      .eq('project_id', id)
+      .select()
+      .single();
 
-    if (updatedServer.length === 0) {
+    if (updateError) {
+      console.error('Update error:', updateError);
       return NextResponse.json({ 
         error: 'Failed to update server' 
       }, { status: 500 });
     }
 
-    return NextResponse.json(updatedServer[0], { status: 200 });
+    return NextResponse.json(updatedServer, { status: 200 });
 
   } catch (error) {
     console.error('PUT error:', error);
@@ -254,24 +271,31 @@ export async function DELETE(request: NextRequest, context: RouteContext) {
       }, { status: 400 });
     }
 
-    // Check if server exists and belongs to project
-    const existingServer = await db.select()
-      .from(mcpServers)
-      .where(and(eq(mcpServers.id, serverId), eq(mcpServers.projectId, id)))
-      .limit(1);
+    const supabase = await createClient();
 
-    if (existingServer.length === 0) {
+    // Check if server exists and belongs to project
+    const { data: existingServer, error: fetchError } = await supabase
+      .from('mcp_servers')
+      .select('id')
+      .eq('id', serverId)
+      .eq('project_id', id)
+      .single();
+
+    if (fetchError || !existingServer) {
       return NextResponse.json({ 
         error: 'Server not found' 
       }, { status: 404 });
     }
 
     // Delete server
-    const deleted = await db.delete(mcpServers)
-      .where(and(eq(mcpServers.id, serverId), eq(mcpServers.projectId, id)))
-      .returning();
+    const { error: deleteError } = await supabase
+      .from('mcp_servers')
+      .delete()
+      .eq('id', serverId)
+      .eq('project_id', id);
 
-    if (deleted.length === 0) {
+    if (deleteError) {
+      console.error('Delete error:', deleteError);
       return NextResponse.json({ 
         error: 'Failed to delete server' 
       }, { status: 500 });

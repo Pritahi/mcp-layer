@@ -1,15 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/db';
-import { apiKeys, projects } from '@/db/schema';
-import { eq } from 'drizzle-orm';
+import { createClient } from '@/lib/supabase/server';
 import { randomBytes } from 'crypto';
 
 export async function POST(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const projectId = params.id;
+    const { id: projectId } = await params;
 
     // Validate project ID
     if (!projectId) {
@@ -19,14 +17,16 @@ export async function POST(
       );
     }
 
-    // Verify project exists
-    const projectExists = await db
-      .select()
-      .from(projects)
-      .where(eq(projects.id, projectId))
-      .limit(1);
+    const supabase = await createClient();
 
-    if (projectExists.length === 0) {
+    // Verify project exists
+    const { data: projectExists, error: projectError } = await supabase
+      .from('projects')
+      .select('id')
+      .eq('id', projectId)
+      .single();
+
+    if (projectError || !projectExists) {
       return NextResponse.json(
         { error: 'Project not found', code: 'PROJECT_NOT_FOUND' },
         { status: 400 }
@@ -63,20 +63,29 @@ export async function POST(
     const keyString = `sk_live_${randomBytes(16).toString('hex')}`;
 
     // Create new API key
-    const newApiKey = await db
-      .insert(apiKeys)
-      .values({
-        projectId,
-        keyString,
+    const { data: newApiKey, error: insertError } = await supabase
+      .from('api_keys')
+      .insert({
+        project_id: projectId,
+        key_string: keyString,
         label: label.trim(),
-        allowedTools: allowedTools || null,
-        blacklistWords: blacklistWords || null,
-        isActive: true,
-        createdAt: new Date().toISOString(),
+        allowed_tools: allowedTools || null,
+        blacklist_words: blacklistWords || null,
+        is_active: true,
+        created_at: new Date().toISOString(),
       })
-      .returning();
+      .select()
+      .single();
 
-    return NextResponse.json(newApiKey[0], { status: 201 });
+    if (insertError) {
+      console.error('Insert error:', insertError);
+      return NextResponse.json(
+        { error: 'Failed to create API key' },
+        { status: 500 }
+      );
+    }
+
+    return NextResponse.json(newApiKey, { status: 201 });
   } catch (error) {
     console.error('POST error:', error);
     return NextResponse.json(
@@ -88,10 +97,10 @@ export async function POST(
 
 export async function GET(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const projectId = params.id;
+    const { id: projectId } = await params;
     const { searchParams } = new URL(request.url);
 
     // Validate project ID
@@ -106,15 +115,24 @@ export async function GET(
     const limit = Math.min(parseInt(searchParams.get('limit') ?? '10'), 100);
     const offset = parseInt(searchParams.get('offset') ?? '0');
 
-    // Fetch API keys for the project
-    const keys = await db
-      .select()
-      .from(apiKeys)
-      .where(eq(apiKeys.projectId, projectId))
-      .limit(limit)
-      .offset(offset);
+    const supabase = await createClient();
 
-    return NextResponse.json(keys, { status: 200 });
+    // Fetch API keys for the project
+    const { data: keys, error } = await supabase
+      .from('api_keys')
+      .select('*')
+      .eq('project_id', projectId)
+      .range(offset, offset + limit - 1);
+
+    if (error) {
+      console.error('Fetch keys error:', error);
+      return NextResponse.json(
+        { error: 'Failed to fetch API keys' },
+        { status: 500 }
+      );
+    }
+
+    return NextResponse.json(keys || [], { status: 200 });
   } catch (error) {
     console.error('GET error:', error);
     return NextResponse.json(

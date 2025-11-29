@@ -1,7 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/db';
-import { apiKeys, mcpServers, projects, auditLogs } from '@/db/schema';
-import { eq, and } from 'drizzle-orm';
+import { createClient } from '@/lib/supabase/server';
 
 export async function POST(request: NextRequest) {
   try {
@@ -16,30 +14,30 @@ export async function POST(request: NextRequest) {
 
     const apiKeyString = authHeader.substring(7); // Remove 'Bearer '
 
-    // Step 2: Look up API key and get project_id
-    const apiKeyResult = await db
-      .select()
-      .from(apiKeys)
-      .where(eq(apiKeys.keyString, apiKeyString))
-      .limit(1);
+    const supabase = await createClient();
 
-    if (apiKeyResult.length === 0) {
+    // Step 2: Look up API key and get project_id
+    const { data: apiKey, error: keyError } = await supabase
+      .from('api_keys')
+      .select('*')
+      .eq('key_string', apiKeyString)
+      .single();
+
+    if (keyError || !apiKey) {
       return NextResponse.json(
         { error: 'Invalid API key', code: 'INVALID_API_KEY' },
         { status: 401 }
       );
     }
 
-    const apiKey = apiKeyResult[0];
-
-    if (!apiKey.isActive) {
+    if (!apiKey.is_active) {
       return NextResponse.json(
         { error: 'API key is inactive', code: 'INACTIVE_API_KEY' },
         { status: 403 }
       );
     }
 
-    const projectId = apiKey.projectId;
+    const projectId = apiKey.project_id;
 
     // Step 3: Parse request body to find server_name or tool name
     const body = await request.json();
@@ -63,20 +61,16 @@ export async function POST(request: NextRequest) {
 
     if (serverName) {
       // Direct lookup by server name
-      const serverResult = await db
-        .select()
-        .from(mcpServers)
-        .where(
-          and(
-            eq(mcpServers.projectId, projectId),
-            eq(mcpServers.name, serverName),
-            eq(mcpServers.isActive, true)
-          )
-        )
-        .limit(1);
+      const { data: serverResult, error: serverError } = await supabase
+        .from('mcp_servers')
+        .select('*')
+        .eq('project_id', projectId)
+        .eq('name', serverName)
+        .eq('is_active', true)
+        .single();
 
-      if (serverResult.length === 0) {
-        await logAuditEntry(projectId, apiKey.id, serverName, toolName, 'error', body, {
+      if (serverError || !serverResult) {
+        await logAuditEntry(supabase, projectId, apiKey.id, serverName, toolName, 'error', body, {
           error: 'Server not found',
         });
 
@@ -86,44 +80,42 @@ export async function POST(request: NextRequest) {
         );
       }
 
-      server = serverResult[0];
+      server = serverResult;
     } else if (toolName) {
       // Search all servers in the project to find one with this tool
-      const allServers = await db
-        .select()
-        .from(mcpServers)
-        .where(
-          and(
-            eq(mcpServers.projectId, projectId),
-            eq(mcpServers.isActive, true)
-          )
-        );
+      const { data: allServers } = await supabase
+        .from('mcp_servers')
+        .select('*')
+        .eq('project_id', projectId)
+        .eq('is_active', true);
 
-      for (const s of allServers) {
-        if (s.cachedTools) {
-          let tools: any[] = [];
-          
-          if (Array.isArray(s.cachedTools)) {
-            tools = s.cachedTools;
-          } else if (s.cachedTools.tools && Array.isArray(s.cachedTools.tools)) {
-            tools = s.cachedTools.tools;
-          }
+      if (allServers) {
+        for (const s of allServers) {
+          if (s.cached_tools) {
+            let tools: any[] = [];
+            
+            if (Array.isArray(s.cached_tools)) {
+              tools = s.cached_tools;
+            } else if (s.cached_tools.tools && Array.isArray(s.cached_tools.tools)) {
+              tools = s.cached_tools.tools;
+            }
 
-          const hasToolName = tools.some((tool: any) => {
-            const tName = typeof tool === 'string' ? tool : tool.name;
-            return tName === toolName;
-          });
+            const hasToolName = tools.some((tool: any) => {
+              const tName = typeof tool === 'string' ? tool : tool.name;
+              return tName === toolName;
+            });
 
-          if (hasToolName) {
-            server = s;
-            serverName = s.name;
-            break;
+            if (hasToolName) {
+              server = s;
+              serverName = s.name;
+              break;
+            }
           }
         }
       }
 
       if (!server) {
-        await logAuditEntry(projectId, apiKey.id, null, toolName, 'error', body, {
+        await logAuditEntry(supabase, projectId, apiKey.id, null, toolName, 'error', body, {
           error: 'No server found with requested tool',
         });
 
@@ -133,7 +125,7 @@ export async function POST(request: NextRequest) {
         );
       }
     } else {
-      await logAuditEntry(projectId, apiKey.id, null, null, 'error', body, {
+      await logAuditEntry(supabase, projectId, apiKey.id, null, null, 'error', body, {
         error: 'Missing server_name or tool identifier',
       });
 
@@ -148,9 +140,9 @@ export async function POST(request: NextRequest) {
     }
 
     // Step 5: Check allowed tools if specified
-    if (apiKey.allowedTools && Array.isArray(apiKey.allowedTools) && apiKey.allowedTools.length > 0) {
-      if (toolName && !apiKey.allowedTools.includes(toolName)) {
-        await logAuditEntry(projectId, apiKey.id, serverName, toolName, 'error', body, {
+    if (apiKey.allowed_tools && Array.isArray(apiKey.allowed_tools) && apiKey.allowed_tools.length > 0) {
+      if (toolName && !apiKey.allowed_tools.includes(toolName)) {
+        await logAuditEntry(supabase, projectId, apiKey.id, serverName, toolName, 'error', body, {
           error: 'Tool not allowed',
         });
 
@@ -162,11 +154,11 @@ export async function POST(request: NextRequest) {
     }
 
     // Step 6: Check blacklist words
-    if (apiKey.blacklistWords && Array.isArray(apiKey.blacklistWords) && apiKey.blacklistWords.length > 0) {
+    if (apiKey.blacklist_words && Array.isArray(apiKey.blacklist_words) && apiKey.blacklist_words.length > 0) {
       const bodyString = JSON.stringify(body).toLowerCase();
-      for (const word of apiKey.blacklistWords) {
+      for (const word of apiKey.blacklist_words) {
         if (bodyString.includes(word.toLowerCase())) {
-          await logAuditEntry(projectId, apiKey.id, serverName, toolName, 'error', body, {
+          await logAuditEntry(supabase, projectId, apiKey.id, serverName, toolName, 'error', body, {
             error: 'Blacklisted word detected',
             word,
           });
@@ -179,27 +171,33 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Step 7: Forward request to MCP server with token swap
+    // Step 7: Forward request to MCP server with optional token
     try {
-      const response = await fetch(server.baseUrl, {
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+
+      // Only add Authorization header if token exists
+      if (server.auth_token) {
+        headers['Authorization'] = `Bearer ${server.auth_token}`;
+      }
+
+      const response = await fetch(server.base_url, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${server.authToken}`,
-        },
+        headers,
         body: JSON.stringify(body),
       });
 
       const responseData = await response.json();
 
       // Log successful request
-      await logAuditEntry(projectId, apiKey.id, serverName, toolName, 'success', body, responseData);
+      await logAuditEntry(supabase, projectId, apiKey.id, serverName, toolName, 'success', body, responseData);
 
       return NextResponse.json(responseData, { status: response.status });
     } catch (error) {
       console.error('Error forwarding to MCP server:', error);
 
-      await logAuditEntry(projectId, apiKey.id, serverName, toolName, 'error', body, {
+      await logAuditEntry(supabase, projectId, apiKey.id, serverName, toolName, 'error', body, {
         error: 'Failed to forward request',
         details: error instanceof Error ? error.message : 'Unknown error',
       });
@@ -228,6 +226,7 @@ export async function POST(request: NextRequest) {
 
 // Helper function to log audit entries
 async function logAuditEntry(
+  supabase: any,
   projectId: string,
   apiKeyId: string,
   serverName: string | null,
@@ -238,25 +237,27 @@ async function logAuditEntry(
 ) {
   try {
     // Get project to find userId
-    const projectResult = await db
-      .select()
-      .from(projects)
-      .where(eq(projects.id, projectId))
-      .limit(1);
+    const { data: project } = await supabase
+      .from('projects')
+      .select('user_id')
+      .eq('id', projectId)
+      .single();
 
-    const userId = projectResult.length > 0 ? projectResult[0].userId : null;
+    const userId = project ? project.user_id : null;
 
-    await db.insert(auditLogs).values({
-      projectId,
-      apiKeyId,
-      userId,
-      serverName,
-      toolName,
-      status,
-      requestBody,
-      responseBody,
-      createdAt: new Date().toISOString(),
-    });
+    await supabase
+      .from('audit_logs')
+      .insert({
+        project_id: projectId,
+        api_key_id: apiKeyId,
+        user_id: userId,
+        server_name: serverName,
+        tool_name: toolName,
+        status,
+        request_body: requestBody,
+        response_body: responseBody,
+        created_at: new Date().toISOString(),
+      });
   } catch (error) {
     console.error('Failed to log audit entry:', error);
   }

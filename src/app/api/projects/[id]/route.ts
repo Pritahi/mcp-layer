@@ -1,14 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/db';
-import { projects, mcpServers } from '@/db/schema';
-import { eq } from 'drizzle-orm';
+import { createClient } from '@/lib/supabase/server';
 
 export async function GET(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const { id } = params;
+    const { id } = await params;
     const { searchParams } = new URL(request.url);
     const userId = searchParams.get('userId');
 
@@ -35,14 +33,17 @@ export async function GET(
       );
     }
 
+    const supabase = await createClient();
+
     // Fetch project by id
-    const projectResult = await db.select()
-      .from(projects)
-      .where(eq(projects.id, id))
-      .limit(1);
+    const { data: project, error: projectError } = await supabase
+      .from('projects')
+      .select('*')
+      .eq('id', id)
+      .single();
 
     // Check if project exists
-    if (projectResult.length === 0) {
+    if (projectError || !project) {
       return NextResponse.json(
         { 
           error: 'Project not found',
@@ -52,10 +53,8 @@ export async function GET(
       );
     }
 
-    const project = projectResult[0];
-
     // Verify userId matches
-    if (project.userId !== userId) {
+    if (project.user_id !== userId) {
       return NextResponse.json(
         { 
           error: 'Project not found',
@@ -66,13 +65,14 @@ export async function GET(
     }
 
     // Fetch all MCP servers for this project
-    const servers = await db.select()
-      .from(mcpServers)
-      .where(eq(mcpServers.projectId, id));
+    const { data: servers } = await supabase
+      .from('mcp_servers')
+      .select('*')
+      .eq('project_id', id);
 
     return NextResponse.json({
       project,
-      servers
+      servers: servers || []
     }, { status: 200 });
 
   } catch (error) {
@@ -88,10 +88,10 @@ export async function GET(
 
 export async function PATCH(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const { id } = params;
+    const { id } = await params;
     const { searchParams } = new URL(request.url);
     const userId = searchParams.get('userId');
 
@@ -133,14 +133,17 @@ export async function PATCH(
       );
     }
 
+    const supabase = await createClient();
+
     // Fetch project by id
-    const projectResult = await db.select()
-      .from(projects)
-      .where(eq(projects.id, id))
-      .limit(1);
+    const { data: project, error: projectError } = await supabase
+      .from('projects')
+      .select('*')
+      .eq('id', id)
+      .single();
 
     // Check if project exists
-    if (projectResult.length === 0) {
+    if (projectError || !project) {
       return NextResponse.json(
         { 
           error: 'Project not found',
@@ -150,10 +153,8 @@ export async function PATCH(
       );
     }
 
-    const project = projectResult[0];
-
     // Verify userId matches
-    if (project.userId !== userId) {
+    if (project.user_id !== userId) {
       return NextResponse.json(
         { 
           error: 'Project not found',
@@ -164,12 +165,14 @@ export async function PATCH(
     }
 
     // Update project name
-    const updatedProject = await db.update(projects)
-      .set({ name: name.trim() })
-      .where(eq(projects.id, id))
-      .returning();
+    const { data: updatedProject, error: updateError } = await supabase
+      .from('projects')
+      .update({ name: name.trim() })
+      .eq('id', id)
+      .select()
+      .single();
 
-    if (updatedProject.length === 0) {
+    if (updateError) {
       return NextResponse.json(
         { 
           error: 'Failed to update project',
@@ -179,7 +182,7 @@ export async function PATCH(
       );
     }
 
-    return NextResponse.json(updatedProject[0], { status: 200 });
+    return NextResponse.json(updatedProject, { status: 200 });
 
   } catch (error) {
     console.error('PATCH error:', error);
@@ -194,10 +197,10 @@ export async function PATCH(
 
 export async function DELETE(
   request: NextRequest,
-  { params }: { params: { id: string } }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const { id } = params;
+    const { id } = await params;
     const { searchParams } = new URL(request.url);
     const userId = searchParams.get('userId');
 
@@ -224,14 +227,17 @@ export async function DELETE(
       );
     }
 
+    const supabase = await createClient();
+
     // Fetch project to verify it exists and userId matches
-    const projectResult = await db.select()
-      .from(projects)
-      .where(eq(projects.id, id))
-      .limit(1);
+    const { data: project, error: projectError } = await supabase
+      .from('projects')
+      .select('user_id')
+      .eq('id', id)
+      .single();
 
     // Check if project exists
-    if (projectResult.length === 0) {
+    if (projectError || !project) {
       return NextResponse.json(
         { 
           error: 'Project not found',
@@ -241,10 +247,8 @@ export async function DELETE(
       );
     }
 
-    const project = projectResult[0];
-
     // Verify userId matches
-    if (project.userId !== userId) {
+    if (project.user_id !== userId) {
       return NextResponse.json(
         { 
           error: 'Project not found',
@@ -255,11 +259,12 @@ export async function DELETE(
     }
 
     // Delete project (cascade will handle related records)
-    const deleted = await db.delete(projects)
-      .where(eq(projects.id, id))
-      .returning();
+    const { error: deleteError } = await supabase
+      .from('projects')
+      .delete()
+      .eq('id', id);
 
-    if (deleted.length === 0) {
+    if (deleteError) {
       return NextResponse.json(
         { 
           error: 'Failed to delete project',

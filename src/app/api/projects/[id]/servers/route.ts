@@ -1,7 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/db';
-import { mcpServers, projects } from '@/db/schema';
-import { eq } from 'drizzle-orm';
+import { createClient } from '@/lib/supabase/server';
 
 export async function POST(
   request: NextRequest,
@@ -18,14 +16,16 @@ export async function POST(
       );
     }
 
-    // Check if project exists
-    const existingProject = await db
-      .select()
-      .from(projects)
-      .where(eq(projects.id, projectId))
-      .limit(1);
+    const supabase = await createClient();
 
-    if (existingProject.length === 0) {
+    // Check if project exists
+    const { data: existingProject, error: projectError } = await supabase
+      .from('projects')
+      .select('id')
+      .eq('id', projectId)
+      .single();
+
+    if (projectError || !existingProject) {
       return NextResponse.json(
         { error: 'Project not found', code: 'PROJECT_NOT_FOUND' },
         { status: 404 }
@@ -60,27 +60,26 @@ export async function POST(
       );
     }
 
-    if (!authToken || typeof authToken !== 'string' || authToken.trim().length === 0) {
-      return NextResponse.json(
-        { error: 'Auth token is required', code: 'INVALID_AUTH_TOKEN' },
-        { status: 400 }
-      );
-    }
-
     // Sanitize inputs
     const sanitizedName = name.trim();
     const sanitizedBaseUrl = baseUrl.trim();
-    const sanitizedAuthToken = authToken.trim();
+    const sanitizedAuthToken = authToken && typeof authToken === 'string' ? authToken.trim() : null;
 
     // CRITICAL: Perform MCP handshake - call list_tools endpoint
     let cachedTools: any = null;
     try {
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+
+      // Only add Authorization header if token is provided
+      if (sanitizedAuthToken) {
+        headers['Authorization'] = `Bearer ${sanitizedAuthToken}`;
+      }
+
       const handshakeResponse = await fetch(sanitizedBaseUrl, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${sanitizedAuthToken}`,
-        },
+        headers,
         body: JSON.stringify({
           jsonrpc: '2.0',
           method: 'tools/list',
@@ -95,7 +94,7 @@ export async function POST(
         if (handshakeResponse.status === 401) {
           return NextResponse.json(
             { 
-              error: 'MCP handshake failed: Invalid authentication token', 
+              error: 'MCP handshake failed: Authentication required or invalid token', 
               code: 'HANDSHAKE_AUTH_FAILED',
               details: errorText
             },
@@ -119,7 +118,7 @@ export async function POST(
             error: `MCP handshake failed: Server returned status ${handshakeResponse.status}`, 
             code: 'HANDSHAKE_FAILED',
             details: errorText,
-            hint: 'Check if the Base URL and Auth Token are correct'
+            hint: 'Check if the Base URL is correct and if authentication is required'
           },
           { status: 400 }
         );
@@ -186,21 +185,30 @@ export async function POST(
 
     // Create MCP server record with handshake results
     const now = new Date().toISOString();
-    const newServer = await db
-      .insert(mcpServers)
-      .values({
-        projectId,
+    const { data: newServer, error: insertError } = await supabase
+      .from('mcp_servers')
+      .insert({
+        project_id: projectId,
         name: sanitizedName,
-        baseUrl: sanitizedBaseUrl,
-        authToken: sanitizedAuthToken,
-        cachedTools: cachedTools,
-        isActive: true,
-        createdAt: now,
-        updatedAt: now,
+        base_url: sanitizedBaseUrl,
+        auth_token: sanitizedAuthToken,
+        cached_tools: cachedTools,
+        is_active: true,
+        created_at: now,
+        updated_at: now,
       })
-      .returning();
+      .select()
+      .single();
 
-    return NextResponse.json(newServer[0], { status: 201 });
+    if (insertError) {
+      console.error('Insert server error:', insertError);
+      return NextResponse.json(
+        { error: 'Failed to create server' },
+        { status: 500 }
+      );
+    }
+
+    return NextResponse.json(newServer, { status: 201 });
 
   } catch (error: any) {
     console.error('POST MCP server error:', error);
@@ -226,14 +234,16 @@ export async function GET(
       );
     }
 
-    // Check if project exists
-    const existingProject = await db
-      .select()
-      .from(projects)
-      .where(eq(projects.id, projectId))
-      .limit(1);
+    const supabase = await createClient();
 
-    if (existingProject.length === 0) {
+    // Check if project exists
+    const { data: existingProject, error: projectError } = await supabase
+      .from('projects')
+      .select('id')
+      .eq('id', projectId)
+      .single();
+
+    if (projectError || !existingProject) {
       return NextResponse.json(
         { error: 'Project not found', code: 'PROJECT_NOT_FOUND' },
         { status: 404 }
@@ -244,14 +254,21 @@ export async function GET(
     const limit = Math.min(parseInt(searchParams.get('limit') ?? '10'), 100);
     const offset = parseInt(searchParams.get('offset') ?? '0');
 
-    const servers = await db
-      .select()
-      .from(mcpServers)
-      .where(eq(mcpServers.projectId, projectId))
-      .limit(limit)
-      .offset(offset);
+    const { data: servers, error: serversError } = await supabase
+      .from('mcp_servers')
+      .select('*')
+      .eq('project_id', projectId)
+      .range(offset, offset + limit - 1);
 
-    return NextResponse.json(servers, { status: 200 });
+    if (serversError) {
+      console.error('Fetch servers error:', serversError);
+      return NextResponse.json(
+        { error: 'Failed to fetch servers' },
+        { status: 500 }
+      );
+    }
+
+    return NextResponse.json(servers || [], { status: 200 });
 
   } catch (error: any) {
     console.error('GET MCP servers error:', error);

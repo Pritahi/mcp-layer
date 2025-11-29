@@ -1,7 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/db';
-import { projects } from '@/db/schema';
-import { eq, and } from 'drizzle-orm';
+import { createClient } from '@/lib/supabase/server';
 
 // Utility function to validate UUID format
 function isValidUUID(uuid: string): boolean {
@@ -57,16 +55,29 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Create new project
-    const newProject = await db.insert(projects)
-      .values({
-        userId: userId,
-        name: trimmedName,
-        createdAt: new Date().toISOString(),
-      })
-      .returning();
+    // Create Supabase client
+    const supabase = await createClient();
 
-    return NextResponse.json(newProject[0], { status: 201 });
+    // Create new project
+    const { data: newProject, error } = await supabase
+      .from('projects')
+      .insert({
+        user_id: userId,
+        name: trimmedName,
+        created_at: new Date().toISOString(),
+      })
+      .select()
+      .single();
+
+    if (error) {
+      console.error('Supabase insert error:', error);
+      return NextResponse.json(
+        { error: 'Failed to create project: ' + error.message },
+        { status: 500 }
+      );
+    }
+
+    return NextResponse.json(newProject, { status: 201 });
 
   } catch (error) {
     console.error('POST error:', error);
@@ -111,14 +122,25 @@ export async function GET(request: NextRequest) {
     const limit = Math.min(parseInt(limitParam ?? '10'), 100);
     const offset = parseInt(offsetParam ?? '0');
 
-    // Fetch projects filtered by userId
-    const projectsList = await db.select()
-      .from(projects)
-      .where(eq(projects.userId, userId))
-      .limit(limit)
-      .offset(offset);
+    // Create Supabase client
+    const supabase = await createClient();
 
-    return NextResponse.json(projectsList, { status: 200 });
+    // Fetch projects filtered by userId
+    const { data: projectsList, error } = await supabase
+      .from('projects')
+      .select('*')
+      .eq('user_id', userId)
+      .range(offset, offset + limit - 1);
+
+    if (error) {
+      console.error('Supabase select error:', error);
+      return NextResponse.json(
+        { error: 'Failed to fetch projects: ' + error.message },
+        { status: 500 }
+      );
+    }
+
+    return NextResponse.json(projectsList || [], { status: 200 });
 
   } catch (error) {
     console.error('GET error:', error);
