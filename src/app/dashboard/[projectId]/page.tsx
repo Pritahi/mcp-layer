@@ -1,63 +1,106 @@
-import { createClient } from '@/lib/supabase/server'
-import { redirect } from 'next/navigation'
+"use client"
+
+import { useEffect, useState } from 'react'
+import { useRouter } from 'next/navigation'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Server, Key, Activity, CheckCircle } from 'lucide-react'
+import { createClient } from '@/lib/supabase/client'
 
 interface ProjectOverviewProps {
   params: Promise<{ projectId: string }>
 }
 
-export default async function ProjectOverviewPage({ params }: ProjectOverviewProps) {
-  const supabase = await createClient()
-  const { projectId } = await params
+export default function ProjectOverviewPage({ params }: ProjectOverviewProps) {
+  const router = useRouter()
+  const [projectId, setProjectId] = useState<string>('')
+  const [loading, setLoading] = useState(true)
+  const [data, setData] = useState<any>(null)
 
-  // Get current user
-  const {
-    data: { user },
-    error: userError,
-  } = await supabase.auth.getUser()
+  useEffect(() => {
+    params.then(p => setProjectId(p.projectId))
+  }, [params])
 
-  if (userError || !user) {
-    console.error('Auth error on project page:', userError)
-    redirect('/login')
+  useEffect(() => {
+    if (!projectId) return
+
+    const fetchData = async () => {
+      try {
+        const supabase = createClient()
+        
+        // Get current user
+        const { data: { user }, error: userError } = await supabase.auth.getUser()
+
+        if (userError || !user) {
+          console.error('Auth error on project page:', userError)
+          router.push('/login')
+          return
+        }
+
+        // Fetch project
+        const { data: project, error: projectError } = await supabase
+          .from('projects')
+          .select('*')
+          .eq('id', projectId)
+          .eq('user_id', user.id)
+          .single()
+
+        if (projectError || !project) {
+          console.error('Project fetch error:', projectError)
+          router.push('/dashboard')
+          return
+        }
+
+        // Fetch servers
+        const { data: servers } = await supabase
+          .from('mcp_servers')
+          .select('*')
+          .eq('project_id', projectId)
+
+        // Fetch API keys
+        const { data: keys } = await supabase
+          .from('api_keys')
+          .select('*')
+          .eq('project_id', projectId)
+
+        // Fetch audit logs count
+        const { count: logsCount } = await supabase
+          .from('audit_logs')
+          .select('*', { count: 'exact', head: true })
+          .eq('project_id', projectId)
+
+        setData({
+          project,
+          servers: servers || [],
+          keys: keys || [],
+          logsCount: logsCount || 0
+        })
+      } catch (error) {
+        console.error('Error fetching project data:', error)
+      } finally {
+        setLoading(false)
+      }
+    }
+
+    fetchData()
+  }, [projectId, router])
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center min-h-screen">
+        <div className="text-zinc-400">Loading...</div>
+      </div>
+    )
   }
 
-  console.log('User authenticated, fetching project:', projectId, 'for user:', user.id)
-
-  // Fetch project directly from Supabase instead of API
-  const { data: project, error: projectError } = await supabase
-    .from('projects')
-    .select('*')
-    .eq('id', projectId)
-    .eq('user_id', user.id)
-    .single()
-
-  if (projectError || !project) {
-    console.error('Project fetch error:', projectError)
-    redirect('/dashboard')
+  if (!data) {
+    return (
+      <div className="flex items-center justify-center min-h-screen">
+        <div className="text-zinc-400">Project not found</div>
+      </div>
+    )
   }
 
-  // Fetch servers directly from Supabase
-  const { data: servers } = await supabase
-    .from('mcp_servers')
-    .select('*')
-    .eq('project_id', projectId)
-
-  const serversList = servers || []
-
-  // Fetch API keys directly from Supabase
-  const { data: keys } = await supabase
-    .from('api_keys')
-    .select('*')
-    .eq('project_id', projectId)
-
-  const keysList = keys || []
-
-  // Fetch audit logs count directly from Supabase
-  const { count: logsCount } = await supabase
-    .from('audit_logs')
-    .select('*', { count: 'exact', head: true })
-    .eq('project_id', projectId)
+  const { servers, keys, logsCount } = data
 
   return (
     <div className="p-6 space-y-8">
@@ -79,9 +122,9 @@ export default async function ProjectOverviewPage({ params }: ProjectOverviewPro
             <Server className="h-4 w-4 text-zinc-400" />
           </CardHeader>
           <CardContent>
-            <div className="text-3xl font-bold text-zinc-50">{serversList.length}</div>
+            <div className="text-3xl font-bold text-zinc-50">{servers.length}</div>
             <p className="text-xs text-zinc-500 mt-1">
-              {serversList.filter((s: any) => s.is_active).length} active
+              {servers.filter((s: any) => s.is_active).length} active
             </p>
           </CardContent>
         </Card>
@@ -94,9 +137,9 @@ export default async function ProjectOverviewPage({ params }: ProjectOverviewPro
             <Key className="h-4 w-4 text-zinc-400" />
           </CardHeader>
           <CardContent>
-            <div className="text-3xl font-bold text-zinc-50">{keysList.length}</div>
+            <div className="text-3xl font-bold text-zinc-50">{keys.length}</div>
             <p className="text-xs text-zinc-500 mt-1">
-              {keysList.filter((k: any) => k.is_active).length} active
+              {keys.filter((k: any) => k.is_active).length} active
             </p>
           </CardContent>
         </Card>
@@ -110,7 +153,7 @@ export default async function ProjectOverviewPage({ params }: ProjectOverviewPro
           </CardHeader>
           <CardContent>
             <div className="text-3xl font-bold text-zinc-50">
-              {logsCount?.toLocaleString() || '0'}
+              {logsCount.toLocaleString()}
             </div>
             <p className="text-xs text-zinc-500 mt-1">All time</p>
           </CardContent>
@@ -137,11 +180,11 @@ export default async function ProjectOverviewPage({ params }: ProjectOverviewPro
             <CardTitle className="text-zinc-50">Connected Servers</CardTitle>
           </CardHeader>
           <CardContent>
-            {serversList.length === 0 ? (
+            {servers.length === 0 ? (
               <p className="text-sm text-zinc-500">No servers connected yet</p>
             ) : (
               <div className="space-y-2">
-                {serversList.map((server: any) => (
+                {servers.map((server: any) => (
                   <div
                     key={server.id}
                     className="flex items-center justify-between p-3 rounded-lg bg-zinc-950 border border-zinc-800"

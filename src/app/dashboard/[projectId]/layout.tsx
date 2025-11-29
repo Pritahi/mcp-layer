@@ -1,41 +1,76 @@
-import { createClient } from '@/lib/supabase/server'
-import { redirect } from 'next/navigation'
+"use client"
+
+import { useEffect, useState } from 'react'
+import { useRouter } from 'next/navigation'
 import { ProjectSidebar } from '@/components/projects/project-sidebar'
+import { createClient } from '@/lib/supabase/client'
 
 interface ProjectLayoutProps {
   children: React.ReactNode
-  params: { projectId: string }
+  params: Promise<{ projectId: string }>
 }
 
-export default async function ProjectLayout({ children, params }: ProjectLayoutProps) {
-  const supabase = await createClient()
-  const { projectId } = await params
+export default function ProjectLayout({ children, params }: ProjectLayoutProps) {
+  const router = useRouter()
+  const [projectId, setProjectId] = useState<string>('')
+  const [projectName, setProjectName] = useState<string>('')
+  const [loading, setLoading] = useState(true)
 
-  // Get current user
-  const {
-    data: { user },
-    error: userError,
-  } = await supabase.auth.getUser()
+  useEffect(() => {
+    params.then(p => setProjectId(p.projectId))
+  }, [params])
 
-  if (userError || !user) {
-    redirect('/login')
+  useEffect(() => {
+    if (!projectId) return
+
+    const checkAuth = async () => {
+      try {
+        const supabase = createClient()
+
+        // Get current user
+        const { data: { user }, error: userError } = await supabase.auth.getUser()
+
+        if (userError || !user) {
+          router.push('/login')
+          return
+        }
+
+        // Fetch project details
+        const { data: project, error: projectError } = await supabase
+          .from('projects')
+          .select('name')
+          .eq('id', projectId)
+          .eq('user_id', user.id)
+          .single()
+
+        if (projectError || !project) {
+          router.push('/dashboard')
+          return
+        }
+
+        setProjectName(project.name)
+      } catch (error) {
+        console.error('Layout auth error:', error)
+        router.push('/login')
+      } finally {
+        setLoading(false)
+      }
+    }
+
+    checkAuth()
+  }, [projectId, router])
+
+  if (loading) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-zinc-950">
+        <div className="text-zinc-400">Loading...</div>
+      </div>
+    )
   }
-
-  // Fetch project details to verify ownership and get name
-  const response = await fetch(
-    `${process.env.NEXT_PUBLIC_SITE_URL}/api/projects/${projectId}?userId=${user.id}`,
-    { cache: 'no-store' }
-  )
-
-  if (!response.ok) {
-    redirect('/dashboard')
-  }
-
-  const data = await response.json()
 
   return (
     <div className="flex min-h-screen bg-zinc-950">
-      <ProjectSidebar projectId={projectId} projectName={data.project.name} />
+      <ProjectSidebar projectId={projectId} projectName={projectName} />
       <main className="flex-1">
         {children}
       </main>
