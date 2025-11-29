@@ -6,6 +6,12 @@ import { redirect } from 'next/navigation'
 export async function login(provider: 'github' | 'google' | 'email', email?: string, password?: string) {
   const supabase = await createClient()
 
+  // Check if user is already logged in
+  const { data: { session } } = await supabase.auth.getSession()
+  if (session) {
+    redirect('/dashboard')
+  }
+
   if (provider === 'email' && email && password) {
     const { error } = await supabase.auth.signInWithPassword({
       email,
