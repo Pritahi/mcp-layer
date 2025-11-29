@@ -38,12 +38,10 @@ export async function login(provider: 'github' | 'google' | 'email', email?: str
 export async function signUp(email: string, password: string) {
   const supabase = await createClient()
 
+  // Sign up without email confirmation
   const { data, error } = await supabase.auth.signUp({
     email,
     password,
-    options: {
-      emailRedirectTo: `${process.env.NEXT_PUBLIC_SITE_URL}/auth/callback`,
-    },
   })
 
   if (error) {
@@ -57,8 +55,21 @@ export async function signUp(email: string, password: string) {
     }
   }
 
-  // If email confirmation is disabled, user is automatically signed in
-  if (data.session) {
+  // Automatically sign in the user after successful registration
+  if (data.user) {
+    const { error: signInError } = await supabase.auth.signInWithPassword({
+      email,
+      password,
+    })
+
+    if (signInError) {
+      return { 
+        success: true, 
+        message: 'Account created! Please sign in to continue.' 
+      }
+    }
+
+    // Successfully signed in
     redirect('/dashboard')
   }
 
